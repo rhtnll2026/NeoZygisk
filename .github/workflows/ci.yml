@@ -18,6 +18,8 @@ jobs:
           submodules: "recursive"
       - name: Test socket IPC with sanitizers
         run: bash tests/host/run.sh
+      - name: Test Android compatibility checks
+        run: python3 -m unittest discover -s tests/compatibility -v
 
   build:
     runs-on: ubuntu-latest
@@ -70,6 +72,9 @@ jobs:
       # ====================================================================
       - name: Build with Gradle
         run: ./gradlew zipRelease zipDebug -Porg.gradle.parallel=true -Porg.gradle.vfs.watch=true -Dorg.gradle.jvmargs=-Xmx2048m
+
+      - name: Verify packaged native binaries and 16 KiB alignment
+        run: python3 tests/compatibility/check_elf.py module/build/outputs/release/NeoZygisk-*.zip
 
       # ====================================================================
       # 3. PREPARE AND UPLOAD ARTIFACTS
