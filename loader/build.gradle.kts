@@ -56,6 +56,9 @@ android {
 
     defaultConfig {
         externalNativeBuild.cmake {
+            // NDK r27 defaults to 4 KiB pages. Also remove PAGE_SIZE assumptions
+            // from arm64/x86_64 compilation without changing the pinned toolchain.
+            arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             cFlags("-std=c18", *defaultCFlags)
             cppFlags("-std=c++20", *defaultCFlags)
             ccachePath?.let {
