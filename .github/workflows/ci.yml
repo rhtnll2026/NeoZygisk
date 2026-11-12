@@ -9,6 +9,16 @@ on:
   merge_group:
 
 jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: "recursive"
+      - name: Test socket IPC with sanitizers
+        run: bash tests/host/run.sh
+
   build:
     runs-on: ubuntu-latest
 
