@@ -23,4 +23,14 @@ add_executable(libzygisk_ptrace.so ${PTRACER_SRC_LIST})
 target_include_directories(libzygisk_ptrace.so PRIVATE include)
 target_link_libraries(libzygisk_ptrace.so log common)
 
+# Both the library and the PIE executable must load on 16 KiB kernels. The
+# common-page-size flag also keeps RELRO from covering adjacent writable data.
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+    foreach(target zygisk libzygisk_ptrace.so)
+        target_link_options(${target} PRIVATE
+            "-Wl,-z,max-page-size=16384"
+            "-Wl,-z,common-page-size=16384")
+    endforeach()
+endif()
+
 add_subdirectory(external)
