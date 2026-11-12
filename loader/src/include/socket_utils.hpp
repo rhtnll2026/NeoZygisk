@@ -1,5 +1,8 @@
 #pragma once
 
+#include <sys/types.h>
+
+#include <cstdint>
 #include <string>
 #include <string_view>
 
