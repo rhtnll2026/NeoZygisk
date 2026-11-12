@@ -3,7 +3,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstddef>
+#include <cstring>
 
 #include "logging.hpp"
 
@@ -45,73 +47,6 @@ size_t xwrite(int fd, const void* buf, size_t count) {
     return write_sz;
 }
 
-ssize_t xrecvmsg(int sockfd, struct msghdr* msg, int flags) {
-    int rec = recvmsg(sockfd, msg, flags);
-    if (rec < 0) PLOGE("recvmsg");
-    return rec;
-}
-
-void* recv_fds(int sockfd, char* cmsgbuf, size_t bufsz, int cnt) {
-    // Create a throwaway buffer.
-    // It must match the size Rust sends (sizeof(int) = 4 bytes).
-    int dummy_data;
-
-    iovec iov = {
-        .iov_base = &dummy_data,
-        .iov_len = sizeof(dummy_data),
-    };
-    msghdr msg = {.msg_name = nullptr,
-                  .msg_namelen = 0,
-                  .msg_iov = &iov,
-                  .msg_iovlen = 1,
-                  .msg_control = cmsgbuf,
-                  .msg_controllen = bufsz,
-                  .msg_flags = 0};
-
-    ssize_t rec = xrecvmsg(sockfd, &msg, MSG_WAITALL);
-
-    // --- IO Failed or Stream Desync ---
-    if (rec != sizeof(dummy_data)) {
-        PLOGE("recv_fds: IO failure. Read %zd bytes, expected %zu", rec, sizeof(dummy_data));
-    }
-
-    cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-
-    // --- No headers received ---
-    if (cmsg == nullptr) {
-        // MSG_CTRUNC tells the two cases apart: the peer attached descriptors and the
-        // kernel refused to install them, typically an SELinux denial on the file being
-        // passed, versus the peer having attached none at all.
-        LOGE("recv_fds: No control headers received. msg_controllen=%zu, %s",
-             (size_t) msg.msg_controllen,
-             (msg.msg_flags & MSG_CTRUNC) ? "the kernel dropped the descriptors"
-                                          : "the peer attached none");
-        return nullptr;
-    }
-
-    // Check msg_controllen <= bufsz
-    if (msg.msg_controllen != bufsz) {
-        LOGW("recv_fds: Size mismatch. Buffer capacity: %zu, Received len: %zu", bufsz,
-             (size_t) msg.msg_controllen);
-    }
-
-    // Check Header Length Field
-    size_t expected_cmsg_len = CMSG_LEN(sizeof(int) * cnt);
-    if (cmsg->cmsg_len != expected_cmsg_len) {
-        LOGW("recv_fds: CMSG header len mismatch. Header says: %zu, Calculated: %zu (cnt=%d)",
-             (size_t) cmsg->cmsg_len, expected_cmsg_len, cnt);
-    }
-
-    // Check Protocol details
-    if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
-        LOGW("recv_fds: Protocol mismatch. Level: %d (exp %d), Type: %d (exp %d)", cmsg->cmsg_level,
-             SOL_SOCKET, cmsg->cmsg_type, SCM_RIGHTS);
-    }
-
-    // Return data anyway so we can see if the FD is valid
-    return CMSG_DATA(cmsg);
-}
-
 template <typename T>
 inline T read_exact_or(int fd, T fail) {
     T res;
@@ -133,10 +68,22 @@ bool write_usize(int fd, size_t val) { return write_exact<size_t>(fd, val); }
 
 std::string read_string(int fd) {
     auto len = read_usize(fd);
-    char* buf = new char[len + 1];
-    buf[len] = '\0';
-    xread(fd, buf, len);
-    return buf;
+    std::string result;
+    if (len > result.max_size()) {
+        LOGE("read_string: invalid length %zu", len);
+        return {};
+    }
+
+    // Grow only as data arrives, rather than allocating a peer-supplied length up front.
+    // The string owns its storage on every exit path, including a truncated payload.
+    char buf[4096];
+    while (len != 0) {
+        const auto chunk = std::min(len, sizeof(buf));
+        if (xread(fd, buf, chunk) != static_cast<ssize_t>(chunk)) return {};
+        result.append(buf, chunk);
+        len -= chunk;
+    }
+    return result;
 }
 
 bool write_u8(int fd, uint8_t val) { return write_exact<uint8_t>(fd, val); }
@@ -148,13 +95,60 @@ bool write_string(int fd, std::string_view str) {
 }
 
 int recv_fd(int sockfd) {
-    char cmsgbuf[CMSG_SPACE(sizeof(int))];
+    alignas(cmsghdr) char cmsgbuf[CMSG_SPACE(sizeof(int))]{};
+    // Rust's passfd sends one int of payload alongside the descriptor.
+    int dummy_data;
+    iovec iov{&dummy_data, sizeof(dummy_data)};
+    msghdr msg{};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsgbuf;
 
-    void* data = recv_fds(sockfd, cmsgbuf, sizeof(cmsgbuf), 1);
-    if (data == nullptr) return -1;
+    ssize_t rec;
+    do {
+        msg.msg_controllen = sizeof(cmsgbuf);
+        msg.msg_flags = 0;
+        rec = recvmsg(sockfd, &msg, MSG_WAITALL);
+    } while (rec < 0 && errno == EINTR);
+    if (rec < 0) {
+        PLOGE("recvmsg");
+        return -1;
+    }
 
-    int result;
-    memcpy(&result, data, sizeof(int));
-    return result;
+    bool valid = rec == sizeof(dummy_data) && !(msg.msg_flags & (MSG_CTRUNC | MSG_TRUNC));
+    int result = -1;
+    size_t count = 0;
+    for (auto* cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        const auto remaining = msg.msg_controllen -
+                               static_cast<size_t>(reinterpret_cast<char*>(cmsg) - cmsgbuf);
+        if (cmsg->cmsg_len < CMSG_LEN(0) || cmsg->cmsg_len > remaining) {
+            valid = false;
+            break;
+        }
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+            valid = false;
+            continue;
+        }
+
+        const auto size = cmsg->cmsg_len - CMSG_LEN(0);
+        if (size % sizeof(int) != 0) valid = false;
+        for (size_t offset = 0; offset + sizeof(int) <= size; offset += sizeof(int)) {
+            int received;
+            memcpy(&received, CMSG_DATA(cmsg) + offset, sizeof(received));
+            if (count++ == 0) {
+                result = received;
+            } else {
+                // Alignment padding can fit a second descriptor even in this buffer.
+                close(received);
+            }
+        }
+    }
+    if (valid && count == 1) return result;
+
+    // Even truncated messages can install descriptors. Release every one we received.
+    if (result >= 0) close(result);
+    LOGE("recv_fd: invalid message (bytes=%zd, flags=%d, descriptors=%zu)", rec, msg.msg_flags,
+         count);
+    return -1;
 }
 }  // namespace socket_utils
