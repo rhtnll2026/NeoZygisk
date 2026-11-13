@@ -179,7 +179,7 @@ fas_u = ForkAndSpec('u', [uid, gid, gids, runtime_flags, rlimits, mount_external
     nice_name, fds_to_close, fds_to_ignore, is_child_zygote, instruction_set, app_data_dir, is_top_app,
     pkg_data_info_list, whitelisted_data_info_list, mount_data_dirs, mount_storage_dirs, mount_sysprop_overrides])
 
-# Android 17 added a use_fifo_ui boolean after is_top_app
+# Android 16 QPR2 and Android 17 have a use_fifo_ui boolean after is_top_app
 fas_c = ForkAndSpec('c', [uid, gid, gids, runtime_flags, rlimits, mount_external, se_info,
     nice_name, fds_to_close, fds_to_ignore, is_child_zygote, instruction_set, app_data_dir, is_top_app,
     use_fifo_ui, pkg_data_info_list, whitelisted_data_info_list, mount_data_dirs, mount_storage_dirs,

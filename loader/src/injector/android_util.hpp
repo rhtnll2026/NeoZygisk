@@ -2,6 +2,8 @@
 
 #include <jni.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -425,7 +427,7 @@ public:
 
     /// @brief Gets a native pointer to an ArtMethod from a reflected Java method object.
     static ArtMethod* FromReflectedMethod(JNIEnv* env, jobject method) {
-        if (!art_method_field_id_) return nullptr;
+        if (!art_method_field_id_ || !method) return nullptr;
         jlong art_method_ptr = jni::GetLongField(env, method, art_method_field_id_);
         return reinterpret_cast<ArtMethod*>(art_method_ptr);
     }
@@ -462,8 +464,9 @@ public:
             return false;
         }
 
-        art_method_field_id_ = jni::GetFieldID(env, executable_class, "artMethod", "J");
-        if (!art_method_field_id_) {
+        // Keep discovery local: a failed attempt must not look initialized on retry.
+        auto art_method_field = jni::GetFieldID(env, executable_class, "artMethod", "J");
+        if (!art_method_field) {
             LOGE("failed to find field 'artMethod' in Executable class");
             return false;
         }
@@ -474,33 +477,52 @@ public:
             return false;
         }
         auto class_class = jni::FindClass(env, "java/lang/Class");
+        if (!class_class) {
+            LOGE("could not find java.lang.Class");
+            return false;
+        }
         jmethodID get_constructors_method = jni::GetMethodID(
             env, class_class, "getDeclaredConstructors", "()[Ljava/lang/reflect/Constructor;");
+        if (!get_constructors_method) {
+            LOGE("could not find Class.getDeclaredConstructors");
+            return false;
+        }
         auto constructors_array = jni::Cast<jobjectArray>(
             jni::CallObjectMethod(env, throwable_class, get_constructors_method));
 
-        if (!constructors_array || env->GetArrayLength(constructors_array.get()) < 2) {
+        if (!constructors_array ||
+            jni::SafeInvoke(env, &JNIEnv::GetArrayLength, constructors_array) < 2) {
             LOGE("throwable has less than 2 constructors, cannot determine ArtMethod size.");
             return false;
         }
 
-        auto first_ctor = jni::ScopedLocalRef<jobject>(
-            env, env->GetObjectArrayElement(constructors_array.get(), 0));
-        auto second_ctor = jni::ScopedLocalRef<jobject>(
-            env, env->GetObjectArrayElement(constructors_array.get(), 1));
-
-        auto* first = FromReflectedMethod(env, first_ctor.get());
-        auto* second = FromReflectedMethod(env, second_ctor.get());
+        auto first_ctor = jni::SafeInvoke(env, &JNIEnv::GetObjectArrayElement, constructors_array, 0);
+        auto second_ctor = jni::SafeInvoke(env, &JNIEnv::GetObjectArrayElement, constructors_array, 1);
+        if (!first_ctor || !second_ctor) {
+            LOGE("failed to get reflected constructors");
+            return false;
+        }
+        auto first = static_cast<uintptr_t>(jni::GetLongField(env, first_ctor, art_method_field));
+        auto second = static_cast<uintptr_t>(jni::GetLongField(env, second_ctor, art_method_field));
 
         if (!first || !second) {
             LOGE("failed to get ArtMethod pointers from constructors.");
             return false;
         }
 
-        art_method_size = reinterpret_cast<uintptr_t>(second) - reinterpret_cast<uintptr_t>(first);
         constexpr auto kPointerSize = sizeof(void*);
+        // Reject underflow and implausible strides before deriving a dereference offset.
+        // This is only a sanity check, not validation of a vendor's private ART layout.
+        if (second <= first || second - first <= 2 * kPointerSize ||
+            second - first > 256 || (second - first) % kPointerSize != 0 ||
+            first % kPointerSize != 0) {
+            LOGE("unsupported ArtMethod constructor layout");
+            return false;
+        }
+        art_method_size = second - first;
         entry_point_offset = art_method_size - kPointerSize;
         data_offset = entry_point_offset - kPointerSize;
+        art_method_field_id_ = art_method_field;
 
         LOGV("ArtMethod size: %zu, data offset: %zu", art_method_size, data_offset);
         return true;
