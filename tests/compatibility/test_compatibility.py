@@ -89,6 +89,30 @@ class ElfCompatibilityTests(unittest.TestCase):
 
 
 class JniCompatibilityTests(unittest.TestCase):
+    def assert_android16_signatures(self, has_fifo_ui):
+        # Pinned AOSP release/QPR revisions and parameter changes are recorded in
+        # ANDROID16.md. QPR2 adds useFifoUi; the other two entry points are unchanged.
+        top_app = "ZZ" if has_fifo_ui else "Z"
+        expected = {
+            "nativeForkAndSpecialize": "(II[II[[IILjava/lang/String;Ljava/lang/String;[I[IZLjava/lang/String;Ljava/lang/String;" + top_app + "[Ljava/lang/String;[Ljava/lang/String;ZZZ)I",
+            "nativeSpecializeAppProcess": "(II[II[[IILjava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/String;Z[Ljava/lang/String;[Ljava/lang/String;ZZZ)V",
+            "nativeForkSystemServer": "(II[II[[IJJ)I",
+        }
+        header = (ROOT / "loader/src/injector/jni_hooks.hpp").read_text()
+        entries = set(re.findall(r'"(native\w+)",\s*"([^"]+)"', header))
+        for name, signature in expected.items():
+            with self.subTest(method=name):
+                self.assertIn((name, signature), entries)
+
+    def test_android16_release_signatures(self):
+        self.assert_android16_signatures(has_fifo_ui=False)
+
+    def test_android16_qpr1_signatures(self):
+        self.assert_android16_signatures(has_fifo_ui=False)
+
+    def test_android16_qpr2_signatures(self):
+        self.assert_android16_signatures(has_fifo_ui=True)
+
     def test_aosp_android17_signatures(self):
         # Derived from native declarations in AOSP android17-release Zygote.java.
         # These check signature coverage, not successful hooks on a running device.

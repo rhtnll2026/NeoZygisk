@@ -4,6 +4,10 @@ Review date: 2026-11-12 UTC. Baseline: `7d0cc085578c5cbd90f7aae59affb11983872dc4
 This is a source and packaged-binary review, not a device certification. No phone,
 rooted emulator, vendor ROM or Android 17 boot test was available for this review.
 
+Follow-up: [Android 16 release/QPR1/QPR2 review](ANDROID16.md), dated
+2026-11-14 (Asia/Singapore), adds pinned AOSP signature checks and fixes failed
+ART initialization publishing a partially initialized cache.
+
 ## Confirmed defect and correction
 
 The Release ZIP from [CI run 43301322905](https://github.com/rhtnll2026/NeoZygisk/actions/runs/43301322905)
@@ -47,10 +51,10 @@ would not validate private ART/linker structures, SELinux policy or boot behavio
 These areas need focused runtime testing before claiming general device support:
 
 - `android_util.hpp` derives private `ArtMethod` offsets from the first two
-  reflected `Throwable` constructors. It assumes their order and spacing and
-  sets its cached field ID before initialization has fully succeeded. A failed
-  initialization followed by a retry can therefore report success with unset
-  offsets. This review does not establish safe operation on a changed ART layout.
+  reflected `Throwable` constructors. It still assumes their order, adjacency and
+  trailing field layout. The Android 16 follow-up fixes partial-cache publication,
+  checks JNI failures and rejects obviously invalid strides, with host regression
+  tests. These checks do not establish safe operation on a changed ART layout.
 - `hook_jni_methods` does not check `RegisterNatives`' return value, while the
   entry function reports success after setting up hooks. A successful daemon
   connection/status is consequently insufficient evidence that every JNI hook
@@ -66,6 +70,11 @@ No new native-Zygote interception, secondary-ABI injection or SELinux-policy
 expansion is introduced by the page-alignment correction.
 
 ## Reproduce the checks
+
+Install a C++20 compiler and a JDK (CI uses Temurin 21), with `JAVA_HOME` pointing
+to the JDK. The JNI mock tests compile the production header against its JNI
+headers and use UBSan; they do not start an Android VM. `JNI_INCLUDE_DIR` can
+override the JNI header directory for local testing.
 
 ```sh
 python3 -m unittest discover -s tests/compatibility -v
