@@ -18,6 +18,11 @@ jobs:
           submodules: "recursive"
       - name: Test socket IPC with sanitizers
         run: bash tests/host/run.sh
+      - name: Setup Java for JNI regression tests
+        uses: actions/setup-java@v6
+        with:
+          distribution: "temurin"
+          java-version: "21"
       - name: Test Android compatibility checks
         run: python3 -m unittest discover -s tests/compatibility -v
 
